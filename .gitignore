@@ -1,0 +1,66 @@
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+./ca
+launch.json
+
+# IDE - Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+
+*.sln.docstates
+
+# IDE - JetBrains (IntelliJ, PyCharm, etc)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sensitive/Environment files
+*.env
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.der
+*.crt
+*.csr
+*.pwd
+secrets/
+credentials/
+
+# PowerShell
+*.ps1.config
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# System Files
+.DS_Store
+Thumbs.db
+test_ssl.sh
+test/ca_auth.config
+test/create_private_certificate_authority.sh
