@@ -1,68 +1,58 @@
-# Cloudflare mTLS CA Certificate Manager
+# Cloudflare MTLS Certificate Upload Tool
 
-A PowerShell script for managing Cloudflare mTLS (mutual TLS) CA certificates. This tool allows you to upload, associate, deassociate, and delete CA certificates for your Cloudflare account.
-
-## Features
-
-- Upload new CA certificates
-- Associate certificates with zones/hostnames
-- Delete existing certificates
-- View all certificates
-- Deassociate certificates from zones
-- View certificate associations
+A PowerShell script for uploading and managing mTLS CA certificates to Cloudflare.
 
 ## Prerequisites
 
 - PowerShell 5.1 or higher
-- Cloudflare API Token with the following permissions:
-  - Access: mTLS Certificates (Edit)
-  - Zone: SSL and Certificates (Edit)
+- A Cloudflare account with API Token access
+- A valid CA certificate file (.crt format)
 
-## Configuration
+## Setup
 
-Create a `config.txt` file in the same directory as the script with the following content:
+1. Create an API Token in Cloudflare dashboard (https://dash.cloudflare.com/profile/api-tokens) with the following permissions:
+   - Zone.SSL and Certificates (Edit)
+   - Zone.Zone (Read)
 
-```plaintext
-# Cloudflare API Token (Required for all operations)
-API_TOKEN=your_api_token_here
-
-# Cloudflare Account ID (Found in the URL when viewing your account or in Account Settings)
-ACCOUNT_ID=your_account_id_here
-
-# Path to your CA certificate file
-CA_CERT_PATH=path_to_your_ca_cert.crt
-
-# Optional: Zone ID (If not provided, will be prompted when needed)
-# ZONE_ID=your_zone_id_here
-```
+2. Copy `config.example.txt` to `config.txt` and update with your values:
+   ```txt
+   API_TOKEN=your_api_token_here
+   AUTH_EMAIL=your.email@example.com
+   ACCOUNT_ID=your_account_id
+   CA_CERT_PATH=C:\path\to\your\custom_ca.crt
+   ```
 
 ## Usage
 
-Run the script using PowerShell:
-
+Run the script with:
 ```powershell
 .\Upload-CloudFlareCACert.ps1
 ```
 
-The script provides a menu-driven interface with the following options:
-
-1. Upload new CA certificate
-2. Associate CA certificate with zone
-3. Delete CA certificate
-4. View certificates
-5. Deassociate CA certificate
-6. View certificate associations
-7. Exit
-
-### Quick Delete Mode
-
-You can also run the script in delete mode:
-
+Optional parameters:
 ```powershell
-.\Upload-CloudFlareCACert.ps1 -Delete
+.\Upload-CloudFlareCACert.ps1 -ConfigPath "path\to\your\config.txt"
 ```
 
-This will directly open the certificate deletion interface.
+The script will:
+1. Read the configuration file
+2. Upload the CA certificate to Cloudflare
+3. Allow you to associate the certificate with specific zones and hostnames
+
+## Configuration File
+
+- `API_TOKEN`: Your Cloudflare API Token
+- `AUTH_EMAIL`: Your Cloudflare account email
+- `ACCOUNT_ID`: Your Cloudflare Account ID
+- `CA_CERT_PATH`: Full path to your CA certificate file
+- `CERT_NAME`: (Optional) Custom name for your certificate
+- `ZONE_ID`: (Optional) Specific Zone ID to work with
+
+## Notes
+
+- The script supports uploading and associating CA certificates
+- Certificates can be associated with multiple zones and hostnames
+- All operations use secure API Token authentication
 
 ## Error Handling
 

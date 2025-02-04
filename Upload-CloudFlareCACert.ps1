@@ -1,6 +1,7 @@
-# Add parameter at the beginning of the script
+# Remove the [switch] parameter
 param(
-    [switch]$Delete
+    [Parameter(Mandatory = $false)]
+    [string]$ConfigPath = ".\config.txt"
 )
 
 # Define the path to the config file (in the same directory as the script)
@@ -112,67 +113,6 @@ function Get-Certificates {
         }
     }
     pause
-}
-
-# Function to remove certificate associations
-function Remove-CertificateAssociations {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$certificateId,
-        [Parameter(Mandatory=$true)]
-        [string]$zoneId,
-        [Parameter(Mandatory=$true)]
-        [hashtable]$headers
-    )
-    
-    try {
-        $uri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
-        
-        # Create body for deassociation that specifically targets the certificate
-        $body = @{
-            "hostnames" = @()
-            "mtls_certificate_id" = $certificateId
-        }
-
-        Write-Host "Attempting to remove associations..."
-        Write-Host "URI: $uri"
-        Write-Host "Certificate ID: $certificateId"
-        
-        $response = Invoke-WebRequest -Uri $uri -Method PUT -Headers $headers -Body (ConvertTo-Json -InputObject $body -Depth 10 -Compress)
-        $result = $response.Content | ConvertFrom-Json
-        
-        if ($result.success) {
-            # Now set the certificate ID to empty to complete deassociation
-            $body = @{
-                "hostnames" = @()
-                "mtls_certificate_id" = ""
-            }
-            
-            $response = Invoke-WebRequest -Uri $uri -Method PUT -Headers $headers -Body (ConvertTo-Json -InputObject $body -Depth 10 -Compress)
-            $result = $response.Content | ConvertFrom-Json
-            
-            if ($result.success) {
-                Write-Host "Successfully removed certificate associations" -ForegroundColor Green
-                return $true
-            }
-        }
-        
-        Write-Host "Failed to remove associations:" -ForegroundColor Red
-        $result.errors | ForEach-Object {
-            Write-Host "Error: $($_.message) (Code: $($_.code))" -ForegroundColor Red
-        }
-        return $false
-        
-    } catch {
-        if ($_.Exception.Response.StatusCode.value__ -eq 404) {
-            Write-Host "No associations found for this certificate" -ForegroundColor Yellow
-            # Continue with deletion even if no associations found
-            return $true
-        } else {
-            Write-Host "Error removing associations: $($_.Exception.Message)" -ForegroundColor Red
-            return $false
-        }
-    }
 }
 
 function Remove-Certificate {
@@ -784,12 +724,6 @@ function Get-CertificateAssociations {
         }
     }
     pause
-}
-
-# If Delete switch is used, perform deletion
-if ($Delete) {
-    Remove-Certificate
-    exit
 }
 
 # Read and parse the config file
