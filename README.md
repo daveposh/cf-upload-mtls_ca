@@ -1,304 +1,103 @@
-# Cloudflare mTLS Worker with Custom CA
+# Cloudflare mTLS CA Certificate Manager
 
-This project implements a Cloudflare Worker that forwards client certificate details to origin servers using Nginx-style headers.
+A PowerShell script for managing Cloudflare mTLS (mutual TLS) CA certificates. This tool allows you to upload, associate, deassociate, and delete CA certificates for your Cloudflare account.
+
+## Features
+
+- Upload new CA certificates
+- Associate certificates with zones/hostnames
+- Delete existing certificates
+- View all certificates
+- Deassociate certificates from zones
+- View certificate associations
 
 ## Prerequisites
 
-- Cloudflare Account with Access to:
-  - SSL/TLS Configuration
-  - Workers
-  - WAF Rules
-- Node.js and npm installed
-- Your own Certificate Authority (CA)
+- PowerShell 5.1 or higher
+- Cloudflare API Token with the following permissions:
+  - Access: mTLS Certificates (Edit)
+  - Zone: SSL and Certificates (Edit)
 
-## Setup Steps
+## Configuration
 
-### 1. Configure Cloudflare mTLS
+Create a `config.txt` file in the same directory as the script with the following content:
 
-1. Go to SSL/TLS > Client Certificates in your Cloudflare dashboard
-2. Enable Client Certificate Verification
-3. Upload your CA Certificate:
-   ```bash
-   # Convert your CA cert to PEM format if needed
-   openssl x509 -in your-ca.crt -out your-ca.pem -outform PEM
-   ```
-4. Set Client Certificate Verification mode to "Required"
+```plaintext
+# Cloudflare API Token (Required for all operations)
+API_TOKEN=your_api_token_here
 
-### 2. Create WAF Rule
+# Cloudflare Account ID (Found in the URL when viewing your account or in Account Settings)
+ACCOUNT_ID=your_account_id_here
 
-1. Navigate to Security > WAF
-2. Create a new Custom Rule:
-   ```
-   Rule Name: Require Client Certificate
-   Expression: not cf.tls_client_auth.cert_verified
-   Action: Block
-   ```
-   This blocks requests without valid client certificates.
+# Path to your CA certificate file
+CA_CERT_PATH=path_to_your_ca_cert.crt
 
-### 3. Install and Configure Wrangler
-
-1. Install Wrangler globally:
-   ```bash
-   npm install -g wrangler
-   ```
-
-2. Authenticate with Cloudflare:
-   ```bash
-   wrangler login
-   ```
-
-3. Create project structure:
-   ```bash
-   mkdir mtls-worker
-   cd mtls-worker
-   ```
-
-4. Create `wrangler.toml`:
-   ```toml
-   name = "mtls_client_cert_details_nginx_formated_headers"
-   main = "src/index.js"
-   compatibility_date = "2024-01-01"
-
-   routes = ["your-domain.com/*"]  # Replace with your domain
-   ```
-
-### 4. Implement the Worker
-
-Create `src/index.js`:
-```javascript
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request))
-})
-
-async function handleRequest(request) {
-  // Clone the request to modify headers
-  let modifiedRequest = new Request(request.url, {
-    method: request.method,
-    headers: request.headers,
-    body: request.body,
-    cf: request.cf
-  })
-
-  // Get TLS certificate details from request.cf
-  const clientCertInfo = request.cf
-
-  // Add Nginx-style SSL headers
-  const newHeaders = new Headers(modifiedRequest.headers)
-  
-  // SSL Protocol version
-  if (clientCertInfo.tlsVersion) {
-    newHeaders.set('ssl-protocol', clientCertInfo.tlsVersion)
-  }
-
-  // SSL Cipher
-  if (clientCertInfo.tlsCipher) {
-    newHeaders.set('ssl-cipher', clientCertInfo.tlsCipher)
-  }
-
-  // Client certificate verification status
-  newHeaders.set('ssl-verify', 'SUCCESS')
-
-  // Client certificate details if available
-  if (clientCertInfo.tlsClientAuth) {
-    if (clientCertInfo.tlsClientAuth.certIssuerDN) {
-      newHeaders.set('ssl-client-i-dn', clientCertInfo.tlsClientAuth.certIssuerDN)
-    }
-    if (clientCertInfo.tlsClientAuth.certSubjectDN) {
-      newHeaders.set('ssl-client-s-dn', clientCertInfo.tlsClientAuth.certSubjectDN)
-    }
-    if (clientCertInfo.tlsClientAuth.certNotBefore) {
-      newHeaders.set('ssl-client-not-before', clientCertInfo.tlsClientAuth.certNotBefore)
-    }
-    if (clientCertInfo.tlsClientAuth.certNotAfter) {
-      newHeaders.set('ssl-client-not-after', clientCertInfo.tlsClientAuth.certNotAfter)
-    }
-  }
-
-  // Create new request with modified headers
-  const finalRequest = new Request(request.url, {
-    method: request.method,
-    headers: newHeaders,
-    body: request.body
-  })
-
-  // Forward the request to the origin
-  return fetch(finalRequest)
-}
+# Optional: Zone ID (If not provided, will be prompted when needed)
+# ZONE_ID=your_zone_id_here
 ```
 
-### 5. Deploy the Worker
+## Usage
 
-```bash
-wrangler deploy
+Run the script using PowerShell:
+
+```powershell
+.\Upload-CloudFlareCACert.ps1
 ```
 
-## Testing
+The script provides a menu-driven interface with the following options:
 
-1. Generate a client certificate signed by your CA:
-   ```bash
-   # Generate private key
-   openssl genrsa -out client.key 2048
+1. Upload new CA certificate
+2. Associate CA certificate with zone
+3. Delete CA certificate
+4. View certificates
+5. Deassociate CA certificate
+6. View certificate associations
+7. Exit
 
-   # Generate CSR
-   openssl req -new -key client.key -out client.csr
+### Quick Delete Mode
 
-   # Sign with your CA
-   openssl x509 -req -in client.csr -CA your-ca.crt -CAkey your-ca.key -CAcreateserial -out client.crt -days 365
-   ```
+You can also run the script in delete mode:
 
-2. Test with curl:
-   ```bash
-   curl --cert client.crt --key client.key https://your-domain.com
-   ```
-
-## Headers Added by Worker
-
-The worker adds the following Nginx-style headers to requests:
-- `ssl-protocol`: TLS version used
-- `ssl-cipher`: Cipher suite used
-- `ssl-verify`: Certificate verification status
-- `ssl-client-i-dn`: Client certificate issuer DN
-- `ssl-client-s-dn`: Client certificate subject DN
-- `ssl-client-not-before`: Certificate validity start date
-- `ssl-client-not-after`: Certificate validity end date
-
-## Security Considerations
-
-- Keep your CA private key secure
-- Regularly rotate client certificates
-- Monitor WAF logs for unauthorized access attempts
-- Consider implementing certificate revocation checks
-- Ensure proper access controls for your CA infrastructure
-- Review and update WAF rules periodically
-- Monitor Cloudflare logs for any unusual patterns
-
-## Implementation Options
-
-### Option 1: Using Workers (as shown above)
-
-The Worker implementation above provides full programmatic control over header manipulation and request processing.
-
-### Option 2: Using Transform Rules
-
-You can alternatively use Cloudflare Transform Rules to add certificate headers without deploying a Worker:
-
-1. Go to Rules > Transform Rules in your Cloudflare dashboard
-2. Click "Create Transform Rule"
-3. Configure the rule:
-   ```
-   Rule Name: mTLS Certificate Headers
-   When incoming requests match...
-     Hostname: your-domain.com
-   Then...
-   Add the following response headers:
-     ssl-protocol: http.tls_version
-     ssl-cipher: http.tls_cipher
-     ssl-client-i-dn: cf.tls_client_auth.cert_issuer_dn
-     ssl-client-s-dn: cf.tls_client_auth.cert_subject_dn
-     ssl-client-not-before: cf.tls_client_auth.cert_not_before
-     ssl-client-not-after: cf.tls_client_auth.cert_not_after
-     ssl-verify: "SUCCESS"
-   ```
-
-Advantages of Transform Rules:
-- No code to maintain
-- Lower latency
-- Simpler configuration
-- No Worker usage costs
-
-Choose the implementation that best fits your needs based on:
-- Required customization
-- Performance requirements
-- Maintenance preferences
-- Cost considerations
-
-## API Reference
-
-### List Certificates
-```bash
-curl -X GET "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/mtls_certificates" \
-  -H "Authorization: Bearer ${API_TOKEN}"
+```powershell
+.\Upload-CloudFlareCACert.ps1 -Delete
 ```
 
-### Upload CA Certificate
-```bash
-curl -X POST "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/mtls_certificates" \
-  -H "Authorization: Bearer ${API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data '{
-    "name": "My Private CA",
-    "certificates": "'$(cat your-ca.base64)'",
-    "ca": true
-  }'
-```
+This will directly open the certificate deletion interface.
 
-### Associate CA with Zone
-```bash
-curl -X PUT "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/mtls_certificates" \
-  -H "X-Auth-Email: ${EMAIL}" \
-  -H "X-Auth-Key: ${GLOBAL_API_KEY}" \
-  -H "Content-Type: application/json" \
-  --data '{
-    "ca": "'${CA_ID}'",
-    "enabled": true,
-    "hostname": "your-domain.com"
-  }'
-```
+## Error Handling
 
-### Remove Association
-```bash
-curl -X PUT "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/mtls_certificates" \
-  -H "X-Auth-Email: ${EMAIL}" \
-  -H "X-Auth-Key: ${GLOBAL_API_KEY}" \
-  -H "Content-Type: application/json" \
-  --data '{
-    "ca": "'${CA_ID}'",
-    "enabled": true,
-    "hostname": ""
-  }'
-```
+The script includes comprehensive error handling and validation:
+- Validates all required configuration values
+- Verifies certificate file existence
+- Confirms operations before execution
+- Provides detailed error messages
+- Verifies successful completion of operations
 
-### Delete Certificate
-```bash
-# Note: Certificate must not be associated with any zone
-curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/mtls_certificates/${MTLS_CERTIFICATE_ID}" \
-  -H "Authorization: Bearer ${API_TOKEN}"
-```
+## Security Notes
 
-### API Payload Reference
+- Store your API Token securely
+- Never share your config.txt file
+- Use environment-specific certificates
+- Follow the principle of least privilege when creating API tokens
 
-#### Upload Certificate Payload
-```json
-{
-  "name": "string (optional)",     // Human readable name
-  "certificates": "string",        // Base64 encoded PEM certificate
-  "ca": true                      // true for CA certificate, false for leaf
-}
-```
+## Troubleshooting
 
-#### Association Payload
-```json
-{
-  "ca": "string",                 // CA ID from upload response
-  "enabled": true,                // Enable/disable mTLS
-  "hostname": "string"            // Domain to associate, or "" to remove
-}
-```
+If you encounter issues:
 
-### Important Notes
-- Certificate deletion requires removing association first
-- Global API Key is required for association/disassociation
-- API Token can be used for all other operations
-- Only one CA can be associated with a hostname at a time
-- Changes may take up to 5 minutes to propagate
+1. Verify your API Token has the correct permissions
+2. Ensure your Account ID and Zone ID are correct
+3. Check that your CA certificate is in valid PEM format
+4. Look for detailed error messages in the script output
 
+## Common Errors
 
+- 404 Not Found: Usually indicates incorrect Account ID or Zone ID
+- 403 Forbidden: Typically means insufficient API Token permissions
+- 400 Bad Request: Often related to invalid certificate format or request body
 
+## Support
 
-
-
-
-
-
-
-
+For issues with the script, please:
+1. Check the error messages
+2. Verify your configuration
+3. Ensure your Cloudflare account has mTLS capabilities enabled

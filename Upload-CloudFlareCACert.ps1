@@ -36,8 +36,8 @@ function Read-ConfigFile {
     }
     
     # Prompt for missing required values
-    if (-not $configDict['API_KEY']) {
-        $configDict['API_KEY'] = Read-Host "Enter your Cloudflare API Key"
+    if (-not $configDict['API_TOKEN']) {
+        $configDict['API_TOKEN'] = Read-Host "Enter your Cloudflare API Token"
     }
     
     if (-not $configDict['AUTH_EMAIL']) {
@@ -57,24 +57,23 @@ function Read-ConfigFile {
 
 function Get-CloudflareHeaders {
     param (
-        [string]$apiKey
+        [string]$apiToken
     )
     
     $configDict = Read-ConfigFile
     return @{
-        "X-Auth-Key" = $apiKey
-        "X-Auth-Email" = $configDict['AUTH_EMAIL']
-        "Content-Type" = "application/json"
+        'Authorization' = "Bearer $apiToken"
+        'Content-Type' = 'application/json'
     }
 }
 
 function Get-Certificates {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
+    $apiToken = $configDict['API_TOKEN']
     $accountId = $configDict['ACCOUNT_ID']
 
     # Use common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    $headers = Get-CloudflareHeaders -apiToken $apiToken
 
     # Define the API endpoint for listing mTLS certificates
     $uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates"
@@ -115,17 +114,76 @@ function Get-Certificates {
     pause
 }
 
+# Function to remove certificate associations
+function Remove-CertificateAssociations {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$certificateId,
+        [Parameter(Mandatory=$true)]
+        [string]$zoneId,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$headers
+    )
+    
+    try {
+        $uri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
+        
+        # Create body for deassociation that specifically targets the certificate
+        $body = @{
+            "hostnames" = @()
+            "mtls_certificate_id" = $certificateId
+        }
+
+        Write-Host "Attempting to remove associations..."
+        Write-Host "URI: $uri"
+        Write-Host "Certificate ID: $certificateId"
+        
+        $response = Invoke-WebRequest -Uri $uri -Method PUT -Headers $headers -Body (ConvertTo-Json -InputObject $body -Depth 10 -Compress)
+        $result = $response.Content | ConvertFrom-Json
+        
+        if ($result.success) {
+            # Now set the certificate ID to empty to complete deassociation
+            $body = @{
+                "hostnames" = @()
+                "mtls_certificate_id" = ""
+            }
+            
+            $response = Invoke-WebRequest -Uri $uri -Method PUT -Headers $headers -Body (ConvertTo-Json -InputObject $body -Depth 10 -Compress)
+            $result = $response.Content | ConvertFrom-Json
+            
+            if ($result.success) {
+                Write-Host "Successfully removed certificate associations" -ForegroundColor Green
+                return $true
+            }
+        }
+        
+        Write-Host "Failed to remove associations:" -ForegroundColor Red
+        $result.errors | ForEach-Object {
+            Write-Host "Error: $($_.message) (Code: $($_.code))" -ForegroundColor Red
+        }
+        return $false
+        
+    } catch {
+        if ($_.Exception.Response.StatusCode.value__ -eq 404) {
+            Write-Host "No associations found for this certificate" -ForegroundColor Yellow
+            # Continue with deletion even if no associations found
+            return $true
+        } else {
+            Write-Host "Error removing associations: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+}
+
 function Remove-Certificate {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
     $accountId = $configDict['ACCOUNT_ID']
-    $zoneId = $configDict['ZONE_ID']
 
-    # Use common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    # Get list of certificates first using the common headers
+    $headers = Get-CloudflareHeaders -apiToken $configDict['API_TOKEN']
 
     try {
-        # Get certificates first
+        # First, get all certificates
         $uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates"
         $response = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers
         $certificates = ($response.Content | ConvertFrom-Json).result
@@ -168,31 +226,71 @@ function Remove-Certificate {
             return
         }
 
+        # Zone ID handling
+        $zoneId = $configDict['ZONE_ID']
+        $useConfigZoneId = $false
+
+        if ($zoneId) {
+            $useConfig = Read-Host "`nZone ID found in config.txt. Use this Zone ID? (Y/N)"
+            $useConfigZoneId = $useConfig -eq 'Y'
+        }
+
+        if (-not $useConfigZoneId) {
+            $zoneId = Read-Host "Enter the Zone ID"
+            if ([string]::IsNullOrWhiteSpace($zoneId)) {
+                Write-Host "Zone ID cannot be empty."
+                pause
+                return
+            }
+        }
+
         # First, deassociate the certificate from any hostnames
         Write-Host "Checking for and removing any hostname associations..."
-        $associationsUri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
+        $associationsRemoved = Remove-CertificateAssociations -certificateId $certId -zoneId $zoneId -headers $headers
         
-        # Create empty body for deassociation
-        $deassociateBody = @{
-            "hostnames" = @()
-            "mtls_certificate_id" = ""
+        if ($associationsRemoved) {
+            # Then delete the certificate itself
+            Write-Host "Deleting certificate from account..."
+            $deleteUri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates/$certId"
+            $deleteResponse = Invoke-WebRequest -Uri $deleteUri -Method Delete -Headers $headers
+            $result = $deleteResponse.Content | ConvertFrom-Json
+            
+            if ($result.success) {
+                Write-Host "Successfully deleted CA certificate '$certName'" -ForegroundColor Green
+                $result | ConvertTo-Json -Depth 4
+                
+                # Verify deletion by listing certificates
+                Write-Host "`nVerifying deletion by listing remaining certificates..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 2  # Brief pause to allow deletion to propagate
+                
+                $verifyResponse = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers
+                $remainingCerts = ($verifyResponse.Content | ConvertFrom-Json).result
+                
+                if ($remainingCerts.Count -eq 0) {
+                    Write-Host "No certificates found - deletion confirmed." -ForegroundColor Green
+                } else {
+                    Write-Host "`nRemaining certificates:" -ForegroundColor Yellow
+                    foreach ($cert in $remainingCerts) {
+                        Write-Host "Certificate ID: $($cert.id)"
+                        Write-Host "Name: $($cert.name)"
+                        Write-Host "----------------------------------------"
+                    }
+                    
+                    # Check if the deleted certificate is still present
+                    $stillExists = $remainingCerts | Where-Object { $_.id -eq $certId }
+                    if ($stillExists) {
+                        Write-Host "`nWarning: The certificate appears to still exist!" -ForegroundColor Red
+                    } else {
+                        Write-Host "`nConfirmed: Certificate '$certName' has been deleted." -ForegroundColor Green
+                    }
+                }
+            } else {
+                Write-Host "Failed to delete certificate:" -ForegroundColor Red
+                $result.errors | ForEach-Object {
+                    Write-Host "Error: $($_.message) (Code: $($_.code))" -ForegroundColor Red
+                }
+            }
         }
-
-        try {
-            $deassociateResponse = Invoke-WebRequest -Uri $associationsUri -Method PUT -Headers $headers -Body (ConvertTo-Json -InputObject $deassociateBody)
-            Write-Host "Successfully removed certificate associations"
-        } catch {
-            Write-Host "Failed to remove certificate associations. Error: $($_.Exception.Message)"
-            pause
-            return
-        }
-
-        # Then delete the certificate itself
-        Write-Host "Deleting certificate from account..."
-        $deleteUri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates/$certId"
-        $deleteResponse = Invoke-WebRequest -Uri $deleteUri -Method Delete -Headers $headers
-        Write-Host "Successfully deleted CA certificate '$certName'"
-        $deleteResponse.Content | ConvertFrom-Json | ConvertTo-Json -Depth 4
 
     } catch {
         Write-Host "Failed to delete CA certificate."
@@ -213,12 +311,12 @@ function Remove-Certificate {
 
 function Upload-Certificate {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
+    $apiToken = $configDict['API_TOKEN']
     $accountId = $configDict['ACCOUNT_ID']
     $caCertPath = $configDict['CA_CERT_PATH']
 
     # Use common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    $headers = Get-CloudflareHeaders -apiToken $apiToken
 
     # Validate CA certificate path
     if (-Not (Test-Path -Path $caCertPath)) {
@@ -241,7 +339,7 @@ function Upload-Certificate {
         }
 
         # Create the request body
-$body = @{
+        $body = @{
             "ca" = $true
             "certificates" = $caCertContent
             "name" = $certName
@@ -260,11 +358,11 @@ $body = @{
         Write-Host "Certificate Path: $caCertPath"
         Write-Host "Certificate Content Length: $($caCertContent.Length)"
         Write-Host "Request Body Length: $($jsonBody.Length)"
-        Write-Host "Request URL: $uri"
-        Write-Host "=======================`n"
-
+        
         # Define the API endpoint
         $uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates"
+        Write-Host "Request URL: $uri"
+        Write-Host "=======================`n"
 
         # Make the API request
         $response = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $jsonBody
@@ -302,11 +400,11 @@ $body = @{
 
 function Associate-Certificate {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
+    $apiToken = $configDict['API_TOKEN']
     $accountId = $configDict['ACCOUNT_ID']
 
     # Get list of certificates first using the common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    $headers = Get-CloudflareHeaders -apiToken $apiToken
 
     try {
         # First, get all certificates
@@ -439,11 +537,10 @@ function Associate-Certificate {
 
 function Deassociate-Certificate {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
     $accountId = $configDict['ACCOUNT_ID']
 
     # Get list of certificates first using the common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    $headers = Get-CloudflareHeaders -apiToken $configDict['API_TOKEN']
 
     try {
         # First, get all certificates
@@ -463,20 +560,24 @@ function Deassociate-Certificate {
             Write-Host "[$($i + 1)] $($certificates[$i].name) (ID: $($certificates[$i].id))"
         }
 
-        # Get user selection for certificate
-        $selection = Read-Host "`nEnter the number of the certificate to deassociate (or 'C' to cancel)"
-        if ($selection -eq 'C') {
-            Write-Host "Operation cancelled."
-            pause
-            return
-        }
+        # Get user selection for certificate with better validation
+        do {
+            $selection = Read-Host "`nEnter the number of the certificate to deassociate (1-$($certificates.Count), or 'C' to cancel)"
+            if ($selection -eq 'C') {
+                Write-Host "Operation cancelled."
+                pause
+                return
+            }
 
-        $index = [int]$selection - 1
-        if ($index -lt 0 -or $index -ge $certificates.Count) {
-            Write-Host "Invalid selection."
-            pause
-            return
-        }
+            $validNumber = [int]::TryParse($selection, [ref]$null)
+            $index = if ($validNumber) { [int]$selection - 1 } else { -1 }
+
+            if (-not $validNumber -or $index -lt 0 -or $index -ge $certificates.Count) {
+                Write-Host "Invalid selection. Please enter a number between 1 and $($certificates.Count)."
+                continue
+            }
+            break
+        } while ($true)
 
         $certId = $certificates[$index].id
         $certName = $certificates[$index].name
@@ -499,6 +600,14 @@ function Deassociate-Certificate {
             }
         }
 
+        # First, get current associations
+        $associationsUri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
+        $getResponse = Invoke-WebRequest -Uri $associationsUri -Method Get -Headers $headers
+        $currentAssociations = ($getResponse.Content | ConvertFrom-Json).result
+
+        Write-Host "`nCurrent associations:"
+        Write-Host ($currentAssociations | ConvertTo-Json)
+
         # Confirm the deassociation
         Write-Host "`nPlease confirm the following:"
         Write-Host "Certificate: $certName (ID: $certId)"
@@ -511,40 +620,42 @@ function Deassociate-Certificate {
             return
         }
 
-        # Create the request body with empty hostnames array and the certificate ID
+        # Create the request body with empty hostnames array
         $body = @{
-            "hostnames" = @()  # Empty array for hostnames
-            "mtls_certificate_id" = $certId  # Include the certificate ID
+            "hostnames" = @()
+            "mtls_certificate_id" = $certId
         }
 
         # Create the request parameters
         $params = @{
-            Uri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
+            Uri = $associationsUri
             Method = 'PUT'
             Headers = $headers
-            Body = ConvertTo-Json -InputObject $body -Depth 10 -Compress
+            Body = (ConvertTo-Json -InputObject $body -Depth 10 -Compress)
         }
 
         Write-Host "`nDeassociating certificate '$certName' from zone..."
+        Write-Host "Request Body: $($params.Body)"
         
-        # Debug information
-        Write-Host "`nDebug Information:"
-        Write-Host "URI: $($params.Uri)"
-        Write-Host "Method: $($params.Method)"
-        Write-Host "Request Body:"
-        Write-Host $params.Bodyn
-
         # Make the request
         $deassociateResponse = Invoke-WebRequest @params
         $result = $deassociateResponse.Content | ConvertFrom-Json
 
         if ($result.success) {
-            Write-Host "`nSuccessfully deassociated certificate"
+            Write-Host "`nSuccessfully deassociated certificate" -ForegroundColor Green
+            
+            # Verify the deassociation
+            $verifyResponse = Invoke-WebRequest -Uri $associationsUri -Method Get -Headers $headers
+            $verifyResult = ($verifyResponse.Content | ConvertFrom-Json).result
+            
+            Write-Host "`nVerifying associations after deassociation:"
+            Write-Host ($verifyResult | ConvertTo-Json)
+            
             $result | ConvertTo-Json -Depth 4
         } else {
-            Write-Host "`nFailed to deassociate certificate:"
+            Write-Host "`nFailed to deassociate certificate:" -ForegroundColor Red
             $result.errors | ForEach-Object {
-                Write-Host "Error: $($_.message) (Code: $($_.code))"
+                Write-Host "Error: $($_.message) (Code: $($_.code))" -ForegroundColor Red
             }
         }
 
@@ -568,11 +679,11 @@ function Deassociate-Certificate {
 # Add the new function to view associations:
 function Get-CertificateAssociations {
     $configDict = Read-ConfigFile
-    $apiKey = $configDict['API_KEY']
+    $apiToken = $configDict['API_TOKEN']
     $accountId = $configDict['ACCOUNT_ID']
 
     # Get list of certificates first using the common headers
-    $headers = Get-CloudflareHeaders -apiKey $apiKey
+    $headers = Get-CloudflareHeaders -apiToken $apiToken
 
     try {
         # First, get all certificates
@@ -685,7 +796,7 @@ if ($Delete) {
 $configDict = Read-ConfigFile
 
 # Extract values from config
-$apiKey = $configDict['API_KEY']
+$apiToken = $configDict['API_TOKEN']
 $accountId = $configDict['ACCOUNT_ID']
 $caCertPath = $configDict['CA_CERT_PATH']
 
@@ -726,7 +837,7 @@ try {
 $uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates"
 
 # Set up the headers for the API request
-$headers = Get-CloudflareHeaders -apiKey $apiKey
+$headers = Get-CloudflareHeaders -apiToken $apiToken
 
 # Debug information
 Write-Host "=== Debug Information ==="
