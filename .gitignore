@@ -8,6 +8,7 @@
 ./ca
 launch.json
 config.txt
+.gitignore
 
 # IDE - Visual Studio
 .vs/
@@ -65,3 +66,5 @@ Thumbs.db
 test_ssl.sh
 test/ca_auth.config
 test/create_private_certificate_authority.sh
+/.cursor
+/.vscode
