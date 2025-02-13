@@ -339,137 +339,163 @@ function Upload-Certificate {
 }
 
 function Associate-Certificate {
+    # 1. List certificates in account
     $configDict = Read-ConfigFile
     $apiToken = $configDict['API_TOKEN']
     $accountId = $configDict['ACCOUNT_ID']
-
-    # Get list of certificates first using the common headers
     $headers = Get-CloudflareHeaders -apiToken $apiToken
-
+    
     try {
-        # First, get all certificates
+        # Get all certificates
         $uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/mtls_certificates"
         $response = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers
         $certificates = ($response.Content | ConvertFrom-Json).result
 
         if ($certificates.Count -eq 0) {
-            Write-Host "`nNo certificates found to associate."
-            pause
+            Write-Host "`nNo certificates found in account." -ForegroundColor Yellow
             return
         }
 
-        # Display certificates with numbers for selection
+        # 2. Display certificates and let user choose one
         Write-Host "`nAvailable certificates:"
         for ($i = 0; $i -lt $certificates.Count; $i++) {
             Write-Host "[$($i + 1)] $($certificates[$i].name) (ID: $($certificates[$i].id))"
         }
 
-        # Get user selection for certificate
         $selection = Read-Host "`nEnter the number of the certificate to associate (or 'C' to cancel)"
         if ($selection -eq 'C') {
             Write-Host "Operation cancelled."
-            pause
             return
         }
 
         $index = [int]$selection - 1
         if ($index -lt 0 -or $index -ge $certificates.Count) {
             Write-Host "Invalid selection."
-            pause
             return
         }
 
-        $certId = $certificates[$index].id
-        $certName = $certificates[$index].name
+        $selectedCert = $certificates[$index]
+        Write-Host "`nSelected Certificate: $($selectedCert.name)"
 
-        # Get hostname to associate
-        $hostname = Read-Host "`nEnter the hostname to associate with this certificate (e.g., example.com)"
-        if ([string]::IsNullOrWhiteSpace($hostname)) {
-            Write-Host "Hostname cannot be empty."
-            pause
-            return
-        }
-
-        # Zone ID handling
+        # Get Zone ID
         $zoneId = $configDict['ZONE_ID']
-        $useConfigZoneId = $false
-
-        if ($zoneId) {
-            $useConfig = Read-Host "`nZone ID found in config.txt. Use this Zone ID? (Y/N)"
-            $useConfigZoneId = $useConfig -eq 'Y'
-        }
-
-        if (-not $useConfigZoneId) {
+        if (-not $zoneId) {
             $zoneId = Read-Host "Enter the Zone ID"
             if ([string]::IsNullOrWhiteSpace($zoneId)) {
                 Write-Host "Zone ID cannot be empty."
-                pause
                 return
             }
         }
 
-        # Confirm the association
-        Write-Host "`nPlease confirm the following:"
-        Write-Host "Certificate: $certName (ID: $certId)"
-        Write-Host "Hostname: $hostname"
-        Write-Host "Zone ID: $zoneId"
+        # 3. Check chosen certificate for existing associations FIRST
+        Write-Host "`nChecking for existing associations..."
+        $associationsUri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
         
-        $confirm = Read-Host "`nProceed with this association? (Y/N)"
-        if ($confirm -ne 'Y') {
-            Write-Host "Operation cancelled."
+        # Add certificate ID as query parameter if specified
+        if ($selectedCert.id) {
+            $associationsUri += "?mtls_certificate_id=$($selectedCert.id)"
+        }
+        
+        Write-Host "Debug: Checking URI: $associationsUri"
+        $associationsResponse = Invoke-RestMethod -Uri $associationsUri -Method Get -Headers $headers
+        
+        $existingHostnames = @()
+
+        # According to the API docs, hostnames are directly in result.hostnames
+        if ($associationsResponse.success -and $associationsResponse.result.hostnames) {
+            $existingHostnames = $associationsResponse.result.hostnames
+            Write-Host "`nExisting Hostname Associations found for certificate '$($selectedCert.name)':"
+            Write-Host "----------------------------------------"
+            Write-Host "Current Hostnames:"
+            $existingHostnames | ForEach-Object { Write-Host "  - $_" }
+            Write-Host "mTLS Certificate ID: $($selectedCert.id)"
+            Write-Host "----------------------------------------"
+        } else {
+            Write-Host "`nNo existing hostname associations found for this certificate."
+        }
+
+        # Get the new hostname
+        $newHostname = Read-Host "`nEnter the hostname to associate with this certificate"
+
+        # Check if hostname is already in the association list
+        if ($existingHostnames -contains $newHostname) {
+            Write-Host "`nThe certificate is already associated with hostname '$newHostname'."
             pause
             return
         }
 
-        # Create the request body with the correct format and order
-        $body = @{
-            "mtls_certificate_id" = $certId  # Certificate UUID first
-            "hostnames" = @($hostname)  # Array of hostnames second
-        }
-
-        # Create the request parameters
-        $params = @{
-            Uri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
-            Method = 'PUT'
-            Headers = $headers
-            Body = ConvertTo-Json -InputObject $body -Depth 10 -Compress
-        }
-
-        Write-Host "`nAssociating certificate '$certName' with hostname '$hostname' in zone..."
-        
-        # Debug information
-        Write-Host "`nDebug Information:"
-        Write-Host "URI: $($params.Uri)"
-        Write-Host "Method: $($params.Method)"
-        Write-Host "Request Body:"
-        Write-Host $params.Body
-
-        # Make the request
-        $associateResponse = Invoke-WebRequest @params
-        $result = $associateResponse.Content | ConvertFrom-Json
-
-        if ($result.success) {
-            Write-Host "`nSuccessfully associated certificate with hostname"
-            $result | ConvertTo-Json -Depth 4
+        # If there are existing associations AND the new hostname is different
+        if ($existingHostnames.Count -gt 0) {
+            Write-Host "`nWould you like to:"
+            Write-Host "1: Append '$newHostname' to the existing hostname associations"
+            Write-Host "2: Override existing associations with '$newHostname'"
+            
+            $choice = Read-Host "`nEnter your choice (1 or 2)"
+            
+            $hostnames = switch ($choice) {
+                "1" { 
+                    Write-Host "`nAppending new hostname to existing associations..."
+                    [array]$updatedHostnames = $existingHostnames
+                    $updatedHostnames += $newHostname
+                    $updatedHostnames
+                }
+                "2" { 
+                    Write-Host "`nOverriding existing associations with new hostname..."
+                    @($newHostname)
+                }
+                default {
+                    Write-Host "Invalid choice. Operation cancelled."
+                    pause
+                    return
+                }
+            }
         } else {
-            Write-Host "`nFailed to associate certificate:"
-            $result.errors | ForEach-Object {
-                Write-Host "Error: $($_.message) (Code: $($_.code))"
+            $hostnames = @($newHostname)
+        }
+
+        # Update the associations
+        $body = @{
+            'mtls_certificate_id' = $selectedCert.id
+            'hostnames' = [array]$hostnames
+        } | ConvertTo-Json -Depth 10
+
+        Write-Host "`nSending update request..."
+        Write-Host "Debug: Request Body:"
+        Write-Host $body
+        
+        $response = Invoke-RestMethod -Uri $associationsUri -Method PUT -Headers $headers -Body $body
+        
+        if ($response.success) {
+            Write-Host "`nSuccessfully updated hostname associations for certificate '$($selectedCert.name)':"
+            Write-Host "----------------------------------------"
+            Write-Host "Updated Hostnames:"
+            $hostnames | ForEach-Object { Write-Host "  - $_" }
+            Write-Host "mTLS Certificate ID: $($selectedCert.id)"
+            Write-Host "----------------------------------------"
+
+            # Verify the update with the correct URI
+            $verifyUri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations?mtls_certificate_id=$($selectedCert.id)"
+            Write-Host "`nVerifying current associations..."
+            Write-Host "Debug: Verify URI: $verifyUri"
+            
+            $verifyResponse = Invoke-RestMethod -Uri $verifyUri -Method Get -Headers $headers
+            
+            if ($verifyResponse.success) {
+                Write-Host "`nCurrent Hostname Associations:"
+                Write-Host "----------------------------------------"
+                Write-Host "Hostnames:"
+                $verifyResponse.result.hostnames | ForEach-Object { Write-Host "  - $_" }
+                Write-Host "----------------------------------------"
             }
         }
 
     } catch {
-        Write-Host "Failed to associate certificate."
+        Write-Host "`nError: $($_.Exception.Message)"
         if ($_.Exception.Response) {
-            $errorResponse = $_.Exception.Response
-            $errorStream = $errorResponse.GetResponseStream()
-            $streamReader = New-Object System.IO.StreamReader($errorStream)
-            $errorMessage = $streamReader.ReadToEnd()
-            Write-Host "Error Response: $errorMessage"
-            Write-Host "Status Code: $($errorResponse.StatusCode.value__)"
-            Write-Host "Status Description: $($errorResponse.StatusDescription)"
-        } else {
-            Write-Host "Error: $($_.Exception.Message)"
+            $errorResponse = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($errorResponse)
+            $errorMessage = $reader.ReadToEnd()
+            Write-Host "Error Details: $errorMessage"
         }
     }
     pause
@@ -724,6 +750,81 @@ function Get-CertificateAssociations {
         }
     }
     pause
+}
+
+# Function to manage hostname associations
+function Manage-HostnameAssociations {
+    param($certificateId)
+
+    $existingAssociations = Get-ExistingAssociations -certificateId $certificateId
+
+    # Get new hostname from user
+    $newHostname = Read-Host "`nEnter the hostname to associate with the certificate"
+    
+    if ($existingAssociations) {
+        $existingHostnames = $existingAssociations.hostnames
+        
+        # Check if the hostname is already associated
+        if ($existingHostnames -contains $newHostname) {
+            Write-Host "`nThe hostname '$newHostname' is already associated with this certificate." -ForegroundColor Yellow
+            return
+        }
+        
+        # If hostname is different, give options to append or override
+        Write-Host "`nExisting Hostname Associations:" -ForegroundColor Cyan
+        $existingHostnames | ForEach-Object { Write-Host "- $_" -ForegroundColor Yellow }
+        
+        Write-Host "`nThe new hostname differs from existing associations. Would you like to:"
+        Write-Host "1: Append '$newHostname' to existing hostname associations"
+        Write-Host "2: Override existing associations with '$newHostname'"
+        
+        $choice = Read-Host "`nEnter your choice (1 or 2)"
+        
+        switch ($choice) {
+            "1" {
+                # Append new hostname to existing ones
+                $allHostnames = $existingHostnames + $newHostname
+            }
+            "2" {
+                # Override with new hostname
+                $allHostnames = @($newHostname)
+            }
+            default {
+                Write-Host "Invalid choice. Returning to main menu." -ForegroundColor Red
+                return
+            }
+        }
+    }
+    else {
+        # No existing associations, use new hostname
+        $allHostnames = @($newHostname)
+    }
+
+    # Prepare the body for the API request
+    $body = @{
+        'hostname_associations' = @(
+            @{
+                'mtls_certificate_id' = $certificateId
+                'hostnames' = $allHostnames
+            }
+        )
+    } | ConvertTo-Json -Depth 10
+
+    # Make the PUT request to update associations
+    $uri = "https://api.cloudflare.com/client/v4/zones/$zoneId/certificate_authorities/hostname_associations"
+    $headers = @{
+        'Authorization' = "Bearer $apiToken"
+        'Content-Type' = 'application/json'
+    }
+
+    try {
+        $response = Invoke-RestMethod -Uri $uri -Method PUT -Headers $headers -Body $body
+        Write-Host "`nSuccessfully updated hostname associations:" -ForegroundColor Green
+        $allHostnames | ForEach-Object { Write-Host "- $_" -ForegroundColor Yellow }
+    }
+    catch {
+        Write-Host "`nError updating hostname associations: $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 # Read and parse the config file

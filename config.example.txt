@@ -1,0 +1,26 @@
+# Cloudflare API Token (Required)
+# Create at: https://dash.cloudflare.com/profile/api-tokens
+# Required permissions:
+# - Zone.SSL and Certificates (Edit)
+# - Zone.Zone (Read)
+# - Account.mTLS Certificates (Edit)
+# - Account Settings (Read)
+API_TOKEN=your_api_token_here
+
+# Your Cloudflare account email (Required)
+AUTH_EMAIL=your.email@example.com
+
+# Your Cloudflare Account ID (Required)
+# Find at: https://dash.cloudflare.com/<account_id>
+ACCOUNT_ID=your_account_id
+
+# Full path to your CA certificate file (Required)
+CA_CERT_PATH=C:\path\to\your\custom_ca.crt
+
+# Zone ID for certificate associations (Optional)
+# If not provided, you'll be prompted when needed
+ZONE_ID=your_zone_id_here
+
+# Custom name for your certificate (Optional)
+# If not provided, the filename will be used
+CERT_NAME=your_certificate_name 
